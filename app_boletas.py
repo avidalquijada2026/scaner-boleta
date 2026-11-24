@@ -31,15 +31,6 @@ def limpiar_json(texto):
 
 st.set_page_config(page_title="Precios Minimarket", layout="wide", initial_sidebar_state="collapsed")
 
-st.markdown("""
-    <style>
-        .block-container { padding: 1rem; max-width: 100%; }
-        [data-testid="stCameraInput"] video, [data-testid="stCameraInput"] img { max-height: 60vh; object-fit: contain; }
-    </style>
-""", unsafe_allow_html=True)
-
-st.title("Escáner Rápido — Minimarket")
-
 if "historial" not in st.session_state:
     st.session_state.historial = []
 if "doc_actual" not in st.session_state:
@@ -47,13 +38,57 @@ if "doc_actual" not in st.session_state:
 if "ultima_foto_id" not in st.session_state:
     st.session_state.ultima_foto_id = None
 
-col_cfg1, col_cfg2, col_cfg3 = st.columns([1, 1, 1.2])
+col_top1, col_top2 = st.columns([2, 1])
+with col_top1:
+    st.title("Escáner — Minimarket")
+with col_top2:
+    forzar_horizontal = st.toggle("Forzar pantalla horizontal (90°)", value=False)
+
+if forzar_horizontal:
+    st.markdown("""
+        <style>
+            .stApp {
+                transform: rotate(90deg);
+                transform-origin: top left;
+                width: 100vh !important;
+                height: 100vw !important;
+                overflow-x: auto;
+                overflow-y: auto;
+                position: fixed;
+                top: 0;
+                left: 100vw;
+            }
+            .block-container {
+                padding: 0.8rem 1.2rem !important;
+                max-width: 100% !important;
+            }
+        </style>
+    """, unsafe_allow_html=True)
+else:
+    st.markdown("""
+        <style>
+            .block-container {
+                padding: 0.8rem 1rem !important;
+                max-width: 100% !important;
+            }
+            [data-testid="stHorizontalBlock"] {
+                flex-wrap: nowrap !important;
+                overflow-x: auto !important;
+            }
+            [data-testid="stCameraInput"] video, [data-testid="stCameraInput"] img {
+                max-height: 55vh;
+                object-fit: contain;
+            }
+        </style>
+    """, unsafe_allow_html=True)
+
+col_cfg1, col_cfg2, col_cfg3 = st.columns([1, 1, 1.3])
 with col_cfg1:
     margen = st.number_input("Margen (%)", min_value=5, max_value=200, value=35, step=5)
 with col_cfg2:
     redondeo = st.selectbox("Redondear a:", [10, 50, 100], index=1)
 with col_cfg3:
-    modo_vista = st.radio("Vista:", ["Horizontal", "Vertical"], horizontal=True)
+    modo_vista = st.radio("Columnas:", ["Todas (Horizontal)", "Compacta"], horizontal=True)
 
 api_key = st.secrets.get("GEMINI_API_KEY", "").strip()
 if not api_key:
@@ -158,17 +193,27 @@ if st.session_state.doc_actual is not None:
         df_actual = pd.DataFrame(filas_actuales)
         st.subheader(f"{doc.get('tipo_documento', 'Documento')} N° {doc.get('numero_documento', '')} — {doc.get('proveedor', '')}")
         
-        columnas_visibles = ["Producto", "Unid.", "Costo c/IVA", f"Venta ({margen}%)", "Ganancia"] if modo_vista == "Vertical" else list(df_actual.columns)
+        columnas_visibles = ["Producto", "Unid.", "Costo c/IVA", f"Venta ({margen}%)", "Ganancia"] if modo_vista == "Compacta" else list(df_actual.columns)
+
+        config_columnas = {
+            "Producto": st.column_config.TextColumn("Producto", width="large"),
+            "Unid.": st.column_config.NumberColumn("Unid.", width="small"),
+            "Neto Unit.": st.column_config.NumberColumn("Neto Unit.", format="$%d", width="small"),
+            "Costo c/IVA": st.column_config.NumberColumn("Costo c/IVA", format="$%d", width="small"),
+            f"Venta ({margen}%)": st.column_config.NumberColumn(f"Venta ({margen}%)", format="$%d", width="small"),
+            "Ganancia": st.column_config.NumberColumn("Ganancia", format="$%d", width="small"),
+        }
 
         df_editado = st.data_editor(
             df_actual[columnas_visibles],
+            column_config=config_columnas,
             use_container_width=True,
             num_rows="dynamic",
             key=f"editor_{st.session_state.ultima_foto_id}_{margen}_{redondeo}_{modo_vista}"
         )
         
         if st.button("Guardar en lista del día", type="primary"):
-            if modo_vista == "Vertical":
+            if modo_vista == "Compacta":
                 df_guardar = df_actual.copy()
                 for col in columnas_visibles:
                     if col in df_editado.columns:
