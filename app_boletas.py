@@ -5,6 +5,7 @@ from pydantic import BaseModel
 from PIL import Image
 import pandas as pd
 import io
+import time
 
 class Producto(BaseModel):
     nombre: str
@@ -23,27 +24,39 @@ foto = st.camera_input("Toma una foto de la factura o boleta")
 if foto is not None:
     imagen = Image.open(foto)
     client = genai.Client(api_key=api_key)
-    modelos = ["gemini-3.8-flash", "gemini-3.8-flash-lite", "gemini-3.0-flash"]
     
+    modelos = ["gemini-3.8-flash", "gemini-3.8-flash-lite"]
+    try:
+        for m in client.models.list():
+            nombre = m.name.replace("models/", "")
+            if "gemini" in nombre and "flash" in nombre and nombre not in modelos:
+                modelos.append(nombre)
+    except Exception:
+        pass
+        
     with st.spinner("Extrayendo productos y precios..."):
         prompt = "Extrae todos los productos de esta boleta o factura con su cantidad, precio unitario y precio total."
         respuesta = None
         ultimo_error = ""
         
-        for m in modelos:
-            try:
-                respuesta = client.models.generate_content(
-                    model=m,
-                    contents=[imagen, prompt],
-                    config=types.GenerateContentConfig(
-                        response_mime_type="application/json",
-                        response_schema=Boleta,
-                    ),
-                )
+        for intento in range(2):
+            for m in modelos:
+                try:
+                    respuesta = client.models.generate_content(
+                        model=m,
+                        contents=[imagen, prompt],
+                        config=types.GenerateContentConfig(
+                            response_mime_type="application/json",
+                            response_schema=Boleta,
+                        ),
+                    )
+                    break
+                except Exception as e:
+                    ultimo_error = f"{m}: {e}"
+            if respuesta is not None:
                 break
-            except Exception as e:
-                ultimo_error = str(e)
-        
+            time.sleep(2)
+            
         if respuesta is not None:
             datos_boleta = Boleta.model_validate_json(respuesta.text)
             
@@ -74,4 +87,4 @@ if foto is not None:
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
         else:
-            st.error(f"Todos los modelos están ocupados en este momento. Detalle: {ultimo_error}")
+            st.error(f"Servidores saturados temporalmente. Último detalle: {ultimo_error}")
