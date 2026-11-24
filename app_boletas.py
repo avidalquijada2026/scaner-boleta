@@ -6,22 +6,39 @@ from PIL import Image
 import pandas as pd
 import io
 import time
+import math
+from datetime import datetime
 
 class Producto(BaseModel):
     nombre: str
     cantidad: int
-    precio_unitario: float
-    precio_total: float
+    precio_unitario_documento: float
+    precio_total_linea: float
 
 class Documento(BaseModel):
     tipo_documento: str
+    proveedor: str
+    numero_documento: str
     iva_desglosado_aparte: bool
     items: list[Producto]
 
-st.title("Escáner de Boletas y Facturas a Excel")
+def redondear_precio_venta(precio, multiplo=50):
+    return int(math.ceil(precio / multiplo) * multiplo)
+
+st.set_page_config(page_title="Precios Minimarket", layout="wide")
+st.title("Escáner de Facturas y Calculadora de Precios de Venta")
+
+if "historial" not in st.session_state:
+    st.session_state.historial = []
+
+col_cfg1, col_cfg2 = st.columns(2)
+with col_cfg1:
+    margen = st.number_input("Margen de ganancia (%)", min_value=5, max_value=200, value=30, step=5)
+with col_cfg2:
+    redondeo = st.selectbox("Redondear precio de venta al múltiplo de:", [10, 50, 100], index=1)
 
 api_key = st.secrets["GEMINI_API_KEY"].strip()
-foto = st.camera_input("Toma una foto de la factura o boleta")
+foto = st.camera_input("Toma una foto de la factura o boleta del proveedor")
 
 if foto is not None:
     imagen = Image.open(foto)
@@ -36,12 +53,14 @@ if foto is not None:
     except Exception:
         pass
         
-    with st.spinner("Extrayendo productos y calculando totales..."):
+    with st.spinner("Calculando costos y precios de venta..."):
         prompt = (
-            "Extrae todos los productos con su cantidad, precio unitario y precio total. "
-            "Indica el tipo_documento ('Factura' o 'Boleta') y marca iva_desglosado_aparte como true "
-            "solo si los precios de los ítems son netos y el IVA se suma al final (como en facturas), "
-            "o false si el IVA ya está incluido en los ítems (como en boletas)."
+            "Extrae el proveedor, número de documento y todos los productos con su cantidad, "
+            "precio unitario y total de línea. Si el nombre indica un pack o caja con unidades "
+            "(ej: 'PACK 12 BEBIDAS', 'CAJA 24 UNIDADES'), extrae el producto tal cual aparece. "
+            "Indica tipo_documento ('Factura' o 'Boleta') y marca iva_desglosado_aparte como true "
+            "solo si los precios de las filas son netos y el IVA (19%) se suma al final (facturas), "
+            "o false si el IVA ya está incluido en los ítems (boletas)."
         )
         respuesta = None
         ultimo_error = ""
@@ -66,52 +85,71 @@ if foto is not None:
             
         if respuesta is not None:
             doc = Documento.model_validate_json(respuesta.text)
+            fecha_hoy = datetime.now().strftime("%d-%m-%Y")
             
-            filas = []
-            subtotal = 0
+            filas_actuales = []
             for p in doc.items:
-                filas.append({
+                cant = p.cantidad if p.cantidad > 0 else 1
+                total_linea = p.precio_total_linea if p.precio_total_linea > 0 else (p.precio_unitario_documento * cant)
+                
+                if doc.iva_desglosado_aparte:
+                    costo_unit_neto = round(total_linea / cant)
+                    costo_unit_iva = round(costo_unit_neto * 1.19)
+                else:
+                    costo_unit_iva = round(total_linea / cant)
+                    costo_unit_neto = round(costo_unit_iva / 1.19)
+                
+                precio_sin_redondear = costo_unit_iva * (1 + (margen / 100))
+                precio_venta = redondear_precio_venta(precio_sin_redondear, redondeo)
+                ganancia_unit = precio_venta - costo_unit_iva
+                
+                filas_actuales.append({
+                    "Fecha": fecha_hoy,
+                    "Proveedor": doc.proveedor,
+                    "N° Factura": doc.numero_documento,
                     "Producto": p.nombre,
-                    "Cantidad": p.cantidad,
-                    "Precio Unitario": p.precio_unitario,
-                    "Total": p.precio_total
+                    "Cant.": cant,
+                    "Costo Unit. Neto": costo_unit_neto,
+                    "Costo Unit. c/IVA": costo_unit_iva,
+                    "Precio Venta Sugerido": precio_venta,
+                    "Ganancia Unit.": ganancia_unit
                 })
-                subtotal += p.precio_total
-                
-            if doc.iva_desglosado_aparte:
-                neto = subtotal
-                iva = round(neto * 0.19)
-                total_final = neto + iva
-            else:
-                total_final = subtotal
-                neto = round(total_final / 1.19)
-                iva = total_final - neto
 
-            df = pd.DataFrame(filas)
-            st.subheader(f"Documento detectado: {doc.tipo_documento}")
-            st.dataframe(df, use_container_width=True)
+            df_actual = pd.DataFrame(filas_actuales)
+            st.subheader(f"{doc.tipo_documento} N° {doc.numero_documento} - {doc.proveedor}")
             
-            col1, col2, col3 = st.columns(3)
-            col1.metric("Monto Neto", f"${neto:,.0f}")
-            col2.metric("IVA (19%)", f"${iva:,.0f}")
-            col3.metric("Total a Pagar", f"${total_final:,.0f}")
-            
-            resumen = pd.DataFrame([
-                {"Producto": "MONTO NETO", "Cantidad": None, "Precio Unitario": None, "Total": neto},
-                {"Producto": "IVA (19%)", "Cantidad": None, "Precio Unitario": None, "Total": iva},
-                {"Producto": "TOTAL A PAGAR", "Cantidad": None, "Precio Unitario": None, "Total": total_final},
-            ])
-            df_excel = pd.concat([df, resumen], ignore_index=True)
-            
-            buffer = io.BytesIO()
-            with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-                df_excel.to_excel(writer, index=False, sheet_name="Detalle")
-                
-            st.download_button(
-                label="Descargar archivo Excel",
-                data=buffer.getvalue(),
-                file_name="documento_escaneado.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            df_editado = st.data_editor(
+                df_actual,
+                use_container_width=True,
+                num_rows="dynamic",
+                key="editor_actual"
             )
+            
+            if st.button("Guardar en la lista de actualización del día", type="primary"):
+                st.session_state.historial.extend(df_editado.to_dict(orient="records"))
+                st.success("Productos agregados a la lista del día.")
         else:
             st.error(f"Servidores saturados temporalmente. Último detalle: {ultimo_error}")
+
+if len(st.session_state.historial) > 0:
+    st.divider()
+    st.subheader("Lista Consolidada del Día para Actualizar Caja / Etiquetas")
+    df_dia = pd.DataFrame(st.session_state.historial)
+    st.dataframe(df_dia, use_container_width=True)
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        buffer = io.BytesIO()
+        with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+            df_dia.to_excel(writer, index=False, sheet_name="Precios_Minimarket")
+            
+        st.download_button(
+            label="Descargar Excel para Actualizar Sistema",
+            data=buffer.getvalue(),
+            file_name=f"precios_minimarket_{datetime.now().strftime('%Y-%m-%d')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+    with col2:
+        if st.button("Limpiar lista del día"):
+            st.session_state.historial = []
+            st.rerun()
