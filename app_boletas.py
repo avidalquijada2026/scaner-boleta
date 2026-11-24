@@ -23,20 +23,28 @@ foto = st.camera_input("Toma una foto de la factura o boleta")
 if foto is not None:
     imagen = Image.open(foto)
     client = genai.Client(api_key=api_key)
+    modelos = ["gemini-3.8-flash", "gemini-3.8-flash-lite", "gemini-3.0-flash"]
     
     with st.spinner("Extrayendo productos y precios..."):
         prompt = "Extrae todos los productos de esta boleta o factura con su cantidad, precio unitario y precio total."
+        respuesta = None
+        ultimo_error = ""
         
-        try:
-            respuesta = client.models.generate_content(
-                model="gemini-3.8-flash",
-                contents=[imagen, prompt],
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    response_schema=Boleta,
-                ),
-            )
-            
+        for m in modelos:
+            try:
+                respuesta = client.models.generate_content(
+                    model=m,
+                    contents=[imagen, prompt],
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        response_schema=Boleta,
+                    ),
+                )
+                break
+            except Exception as e:
+                ultimo_error = str(e)
+        
+        if respuesta is not None:
             datos_boleta = Boleta.model_validate_json(respuesta.text)
             
             filas = []
@@ -65,5 +73,5 @@ if foto is not None:
                 file_name="boleta_escaneada.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
-        except Exception as e:
-            st.error(f"Detalle exacto del error de Gemini: {e}")
+        else:
+            st.error(f"Todos los modelos están ocupados en este momento. Detalle: {ultimo_error}")
