@@ -4,13 +4,9 @@ from google.genai import types
 from PIL import Image, ImageOps
 import pandas as pd
 import io
-import math
 import json
 import re
 from datetime import datetime
-
-def redondear_precio_venta(precio, multiplo=50):
-    return int(math.ceil(precio / multiplo) * multiplo)
 
 def comprimir_para_ocr(imagen_pil, max_lado=800):
     img = ImageOps.exif_transpose(imagen_pil).convert("L")
@@ -82,12 +78,10 @@ else:
         </style>
     """, unsafe_allow_html=True)
 
-col_cfg1, col_cfg2, col_cfg3 = st.columns([1, 1, 1.3])
+col_cfg1, col_cfg2 = st.columns([1, 1.5])
 with col_cfg1:
     margen = st.number_input("Margen (%)", min_value=5, max_value=200, value=35, step=5)
 with col_cfg2:
-    redondeo = st.selectbox("Redondear a:", [10, 50, 100], index=1)
-with col_cfg3:
     modo_vista = st.radio("Columnas:", ["Todas (Horizontal)", "Compacta"], horizontal=True)
 
 api_key = st.secrets.get("GEMINI_API_KEY", "").strip()
@@ -169,13 +163,15 @@ if st.session_state.doc_actual is not None:
             continue
             
         if doc.get("iva_desglosado_aparte", True):
-            costo_unit_neto = round(total_linea / total_unidades)
-            costo_unit_iva = round(costo_unit_neto * 1.19)
+            costo_unit_neto_exacto = total_linea / total_unidades
+            costo_unit_iva_exacto = costo_unit_neto_exacto * 1.19
         else:
-            costo_unit_iva = round(total_linea / total_unidades)
-            costo_unit_neto = round(costo_unit_iva / 1.19)
+            costo_unit_iva_exacto = total_linea / total_unidades
+            costo_unit_neto_exacto = costo_unit_iva_exacto / 1.19
         
-        precio_venta = redondear_precio_venta(costo_unit_iva * (1 + (margen / 100)), redondeo)
+        costo_unit_neto = int(costo_unit_neto_exacto)
+        costo_unit_iva = int(costo_unit_iva_exacto)
+        precio_venta = int(costo_unit_iva_exacto * (1 + (margen / 100)))
         
         filas_actuales.append({
             "Fecha": fecha_hoy,
@@ -209,7 +205,7 @@ if st.session_state.doc_actual is not None:
             column_config=config_columnas,
             use_container_width=True,
             num_rows="dynamic",
-            key=f"editor_{st.session_state.ultima_foto_id}_{margen}_{redondeo}_{modo_vista}"
+            key=f"editor_{st.session_state.ultima_foto_id}_{margen}_{modo_vista}"
         )
         
         if st.button("Guardar en lista del día", type="primary"):
