@@ -13,10 +13,12 @@ class Producto(BaseModel):
     precio_unitario: float
     precio_total: float
 
-class Boleta(BaseModel):
+class Documento(BaseModel):
+    tipo_documento: str
+    iva_desglosado_aparte: bool
     items: list[Producto]
 
-st.title("Escáner de Boletas a Excel")
+st.title("Escáner de Boletas y Facturas a Excel")
 
 api_key = st.secrets["GEMINI_API_KEY"].strip()
 foto = st.camera_input("Toma una foto de la factura o boleta")
@@ -34,8 +36,13 @@ if foto is not None:
     except Exception:
         pass
         
-    with st.spinner("Extrayendo productos y precios..."):
-        prompt = "Extrae todos los productos de esta boleta o factura con su cantidad, precio unitario y precio total."
+    with st.spinner("Extrayendo productos y calculando totales..."):
+        prompt = (
+            "Extrae todos los productos con su cantidad, precio unitario y precio total. "
+            "Indica el tipo_documento ('Factura' o 'Boleta') y marca iva_desglosado_aparte como true "
+            "solo si los precios de los ítems son netos y el IVA se suma al final (como en facturas), "
+            "o false si el IVA ya está incluido en los ítems (como en boletas)."
+        )
         respuesta = None
         ultimo_error = ""
         
@@ -47,7 +54,7 @@ if foto is not None:
                         contents=[imagen, prompt],
                         config=types.GenerateContentConfig(
                             response_mime_type="application/json",
-                            response_schema=Boleta,
+                            response_schema=Documento,
                         ),
                     )
                     break
@@ -58,32 +65,52 @@ if foto is not None:
             time.sleep(2)
             
         if respuesta is not None:
-            datos_boleta = Boleta.model_validate_json(respuesta.text)
+            doc = Documento.model_validate_json(respuesta.text)
             
             filas = []
-            suma_total = 0
-            for p in datos_boleta.items:
+            subtotal = 0
+            for p in doc.items:
                 filas.append({
                     "Producto": p.nombre,
                     "Cantidad": p.cantidad,
                     "Precio Unitario": p.precio_unitario,
                     "Total": p.precio_total
                 })
-                suma_total += p.precio_total
+                subtotal += p.precio_total
                 
+            if doc.iva_desglosado_aparte:
+                neto = subtotal
+                iva = round(neto * 0.19)
+                total_final = neto + iva
+            else:
+                total_final = subtotal
+                neto = round(total_final / 1.19)
+                iva = total_final - neto
+
             df = pd.DataFrame(filas)
-            
+            st.subheader(f"Documento detectado: {doc.tipo_documento}")
             st.dataframe(df, use_container_width=True)
-            st.subheader(f"Total calculado: ${suma_total:,.0f}")
+            
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Monto Neto", f"${neto:,.0f}")
+            col2.metric("IVA (19%)", f"${iva:,.0f}")
+            col3.metric("Total a Pagar", f"${total_final:,.0f}")
+            
+            resumen = pd.DataFrame([
+                {"Producto": "MONTO NETO", "Cantidad": None, "Precio Unitario": None, "Total": neto},
+                {"Producto": "IVA (19%)", "Cantidad": None, "Precio Unitario": None, "Total": iva},
+                {"Producto": "TOTAL A PAGAR", "Cantidad": None, "Precio Unitario": None, "Total": total_final},
+            ])
+            df_excel = pd.concat([df, resumen], ignore_index=True)
             
             buffer = io.BytesIO()
             with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-                df.to_excel(writer, index=False, sheet_name="Boleta")
+                df_excel.to_excel(writer, index=False, sheet_name="Detalle")
                 
             st.download_button(
                 label="Descargar archivo Excel",
                 data=buffer.getvalue(),
-                file_name="boleta_escaneada.xlsx",
+                file_name="documento_escaneado.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
         else:
