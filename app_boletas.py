@@ -2,17 +2,16 @@
 from google import genai
 from google.genai import types
 from pydantic import BaseModel
-from PIL import Image
+from PIL import Image, ImageOps
 import pandas as pd
 import io
-import time
 import math
 from datetime import datetime
 
 class Producto(BaseModel):
     nombre: str
-    cantidad: int
-    precio_unitario_documento: float
+    cantidad_bultos: int
+    unidades_por_bulto: int
     precio_total_linea: float
 
 class Documento(BaseModel):
@@ -25,8 +24,36 @@ class Documento(BaseModel):
 def redondear_precio_venta(precio, multiplo=50):
     return int(math.ceil(precio / multiplo) * multiplo)
 
-st.set_page_config(page_title="Precios Minimarket", layout="wide")
-st.title("Escáner de Facturas y Calculadora de Precios de Venta")
+def optimizar_imagen(imagen_pil, max_lado=1200):
+    img = ImageOps.exif_transpose(imagen_pil)
+    img.thumbnail((max_lado, max_lado))
+    return img
+
+st.set_page_config(page_title="Precios Minimarket", layout="wide", initial_sidebar_state="collapsed")
+
+st.markdown("""
+    <style>
+        .block-container {
+            padding-top: 1rem;
+            padding-bottom: 1rem;
+            padding-left: 1rem;
+            padding-right: 1rem;
+            max-width: 100%;
+        }
+        [data-testid="stCameraInput"] video, [data-testid="stCameraInput"] img {
+            max-height: 65vh;
+            object-fit: contain;
+        }
+        @media (orientation: landscape) {
+            .block-container {
+                padding-left: 1.5rem;
+                padding-right: 1.5rem;
+            }
+        }
+    </style>
+""", unsafe_allow_html=True)
+
+st.title("Escáner de Facturas — Minimarket")
 
 if "historial" not in st.session_state:
     st.session_state.historial = []
@@ -35,63 +62,62 @@ if "doc_actual" not in st.session_state:
 if "ultima_foto_id" not in st.session_state:
     st.session_state.ultima_foto_id = None
 
-col_cfg1, col_cfg2 = st.columns(2)
+col_cfg1, col_cfg2, col_cfg3 = st.columns([1, 1, 1.2])
 with col_cfg1:
-    margen = st.number_input("Margen de ganancia (%)", min_value=5, max_value=200, value=35, step=5)
+    margen = st.number_input("Margen (%)", min_value=5, max_value=200, value=35, step=5)
 with col_cfg2:
-    redondeo = st.selectbox("Redondear precio de venta al múltiplo de:", [10, 50, 100], index=1)
+    redondeo = st.selectbox("Redondear a:", [10, 50, 100], index=1)
+with col_cfg3:
+    modo_vista = st.radio("Orientación de tabla:", ["Horizontal (Completa)", "Vertical (Compacta)"], horizontal=True)
 
 api_key = st.secrets["GEMINI_API_KEY"].strip()
-foto = st.camera_input("Toma una foto de la factura o boleta del proveedor")
+
+tab_cam, tab_subir = st.tabs(["Cámara Directa", "Subir Foto / Galería"])
+with tab_cam:
+    foto_cam = st.camera_input("Enfoca la factura en vertical u horizontal")
+with tab_subir:
+    foto_archivo = st.file_uploader("Selecciona una foto tomada con tu cámara", type=["jpg", "jpeg", "png", "webp"])
+
+foto = foto_cam if foto_cam is not None else foto_archivo
 
 if foto is not None:
     foto_id = f"{foto.name}_{foto.size}"
     if foto_id != st.session_state.ultima_foto_id:
-        imagen = Image.open(foto)
+        imagen_optimizada = optimizar_imagen(Image.open(foto))
         client = genai.Client(api_key=api_key)
-        
-        modelos = ["gemini-3.8-flash", "gemini-3.8-flash-lite"]
-        try:
-            for m in client.models.list():
-                nombre = m.name.replace("models/", "")
-                if "gemini" in nombre and "flash" in nombre and nombre not in modelos:
-                    modelos.append(nombre)
-        except Exception:
-            pass
+        modelos = ["gemini-3.8-flash-lite", "gemini-3.8-flash"]
             
-        with st.spinner("Leyendo factura del proveedor..."):
+        with st.spinner("Procesando factura..."):
             prompt = (
-                "Extrae el proveedor, número de documento y todos los productos con su cantidad, "
-                "precio unitario y total de línea. Indica tipo_documento ('Factura' o 'Boleta') y marca "
-                "iva_desglosado_aparte como true solo si los precios de las filas son netos y el IVA (19%) "
-                "se suma al final (facturas), o false si el IVA ya está incluido en los ítems (boletas)."
+                "Extrae el proveedor, número de documento y todos los productos. "
+                "Para cada producto indica cantidad_bultos (la columna CANT), "
+                "unidades_por_bulto (si la descripción dice CAJA 12 UNID, PACK 6, FARDÓN 6, etc., pon 12, 6, etc.; si es producto suelto pon 1) "
+                "y precio_total_linea. Indica tipo_documento ('Factura' o 'Boleta') y marca iva_desglosado_aparte=true "
+                "si los precios de las filas son netos y el IVA se suma al final, o false si el IVA ya está incluido."
             )
             respuesta = None
             ultimo_error = ""
             
-            for intento in range(2):
-                for m in modelos:
-                    try:
-                        respuesta = client.models.generate_content(
-                            model=m,
-                            contents=[imagen, prompt],
-                            config=types.GenerateContentConfig(
-                                response_mime_type="application/json",
-                                response_schema=Documento,
-                            ),
-                        )
-                        break
-                    except Exception as e:
-                        ultimo_error = f"{m}: {e}"
-                if respuesta is not None:
+            for m in modelos:
+                try:
+                    respuesta = client.models.generate_content(
+                        model=m,
+                        contents=[imagen_optimizada, prompt],
+                        config=types.GenerateContentConfig(
+                            response_mime_type="application/json",
+                            response_schema=Documento,
+                            temperature=0.1,
+                        ),
+                    )
                     break
-                time.sleep(2)
+                except Exception as e:
+                    ultimo_error = f"{m}: {e}"
                 
             if respuesta is not None:
                 st.session_state.doc_actual = Documento.model_validate_json(respuesta.text)
                 st.session_state.ultima_foto_id = foto_id
             else:
-                st.error(f"Servidores saturados temporalmente. Último detalle: {ultimo_error}")
+                st.error(f"Error de conexión con Gemini: {ultimo_error}")
 
 if st.session_state.doc_actual is not None:
     doc = st.session_state.doc_actual
@@ -99,49 +125,60 @@ if st.session_state.doc_actual is not None:
     
     filas_actuales = []
     for p in doc.items:
-        cant = p.cantidad if p.cantidad > 0 else 1
-        total_linea = p.precio_total_linea if p.precio_total_linea > 0 else (p.precio_unitario_documento * cant)
+        bultos = p.cantidad_bultos if p.cantidad_bultos > 0 else 1
+        unid_bulto = p.unidades_por_bulto if p.unidades_por_bulto > 0 else 1
+        total_unidades = bultos * unid_bulto
         
         if doc.iva_desglosado_aparte:
-            costo_unit_neto = round(total_linea / cant)
+            costo_unit_neto = round(p.precio_total_linea / total_unidades)
             costo_unit_iva = round(costo_unit_neto * 1.19)
         else:
-            costo_unit_iva = round(total_linea / cant)
+            costo_unit_iva = round(p.precio_total_linea / total_unidades)
             costo_unit_neto = round(costo_unit_iva / 1.19)
         
-        precio_sin_redondear = costo_unit_iva * (1 + (margen / 100))
-        precio_venta = redondear_precio_venta(precio_sin_redondear, redondeo)
-        ganancia_unit = precio_venta - costo_unit_iva
+        precio_venta = redondear_precio_venta(costo_unit_iva * (1 + (margen / 100)), redondeo)
         
         filas_actuales.append({
             "Fecha": fecha_hoy,
             "Proveedor": doc.proveedor,
-            "N° Factura": doc.numero_documento,
+            "N° Doc": doc.numero_documento,
             "Producto": p.nombre,
-            "Cant.": cant,
-            "Costo Unit. Neto": costo_unit_neto,
-            "Costo Unit. c/IVA": costo_unit_iva,
-            "Precio Venta Sugerido": precio_venta,
-            "Ganancia Unit.": ganancia_unit
+            "Unid.": total_unidades,
+            "Neto Unit.": costo_unit_neto,
+            "Costo c/IVA": costo_unit_iva,
+            f"Venta ({margen}%)": precio_venta,
+            "Ganancia": precio_venta - costo_unit_iva
         })
 
     df_actual = pd.DataFrame(filas_actuales)
-    st.subheader(f"{doc.tipo_documento} N° {doc.numero_documento} - {doc.proveedor}")
+    st.subheader(f"{doc.tipo_documento} N° {doc.numero_documento} — {doc.proveedor}")
     
+    if modo_vista == "Vertical (Compacta)":
+        columnas_visibles = ["Producto", "Unid.", "Costo c/IVA", f"Venta ({margen}%)", "Ganancia"]
+    else:
+        columnas_visibles = list(df_actual.columns)
+
     df_editado = st.data_editor(
-        df_actual,
+        df_actual[columnas_visibles],
         use_container_width=True,
         num_rows="dynamic",
-        key=f"editor_{st.session_state.ultima_foto_id}_{margen}_{redondeo}"
+        key=f"editor_{st.session_state.ultima_foto_id}_{margen}_{redondeo}_{modo_vista}"
     )
     
-    if st.button("Guardar en la lista de actualización del día", type="primary"):
-        st.session_state.historial.extend(df_editado.to_dict(orient="records"))
-        st.success("Productos agregados a la lista del día.")
+    if st.button("Guardar en lista del día", type="primary"):
+        if modo_vista == "Vertical (Compacta)":
+            df_guardar = df_actual.copy()
+            for col in columnas_visibles:
+                if col in df_editado.columns:
+                    df_guardar[col] = df_editado[col]
+            st.session_state.historial.extend(df_guardar.to_dict(orient="records"))
+        else:
+            st.session_state.historial.extend(df_editado.to_dict(orient="records"))
+        st.success("Guardado en la lista del día.")
 
 if len(st.session_state.historial) > 0:
     st.divider()
-    st.subheader("Lista Consolidada del Día para Actualizar Caja / Etiquetas")
+    st.subheader("Registro Consolidado del Día")
     df_dia = pd.DataFrame(st.session_state.historial)
     st.dataframe(df_dia, use_container_width=True)
     
@@ -152,12 +189,12 @@ if len(st.session_state.historial) > 0:
             df_dia.to_excel(writer, index=False, sheet_name="Precios_Minimarket")
             
         st.download_button(
-            label="Descargar Excel para Actualizar Sistema",
+            label="Descargar Excel del Día",
             data=buffer.getvalue(),
             file_name=f"precios_minimarket_{datetime.now().strftime('%Y-%m-%d')}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
     with col2:
-        if st.button("Limpiar lista del día"):
+        if st.button("Limpiar lista"):
             st.session_state.historial = []
             st.rerun()
