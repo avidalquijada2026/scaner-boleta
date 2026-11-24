@@ -33,7 +33,7 @@ def comprimir_para_ocr(imagen_pil, max_lado=1024):
 
 @st.cache_resource
 def obtener_cliente(api_key):
-    return genai.Client(api_key=api_key, http_options={"timeout": 8.0})
+    return genai.Client(api_key=api_key, http_options={"timeout": 25.0})
 
 st.set_page_config(page_title="Precios Minimarket", layout="wide", initial_sidebar_state="collapsed")
 
@@ -80,7 +80,7 @@ foto = foto_cam if foto_cam is not None else foto_archivo
 if foto is not None:
     foto_id = f"{foto.name}_{foto.size}"
     if foto_id != st.session_state.ultima_foto_id:
-        with st.spinner("Leyendo en segundos..."):
+        with st.spinner("Leyendo factura..."):
             parte_imagen = comprimir_para_ocr(Image.open(foto))
             modelos = ["gemini-3.8-flash-lite", "gemini-3.8-flash"]
             prompt = (
@@ -101,7 +101,7 @@ if foto is not None:
                             response_mime_type="application/json",
                             response_schema=Documento,
                             temperature=0.0,
-                            thinking_config=types.ThinkingConfig(thinking_budget=0),
+                            media_resolution="MEDIA_RESOLUTION_LOW",
                         ),
                     )
                     break
