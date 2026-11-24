@@ -129,4 +129,76 @@ if st.session_state.doc_actual is not None:
             bultos = int(float(p.get("cantidad_bultos") or 1)) or 1
             unid_bulto = int(float(p.get("unidades_por_bulto") or 1)) or 1
             total_unidades = bultos * unid_bulto
-            total_linea = float(p.get("precio_total_linea
+            total_linea = float(p.get("precio_total_linea") or 0)
+        except Exception:
+            continue
+            
+        if doc.get("iva_desglosado_aparte", True):
+            costo_unit_neto = round(total_linea / total_unidades)
+            costo_unit_iva = round(costo_unit_neto * 1.19)
+        else:
+            costo_unit_iva = round(total_linea / total_unidades)
+            costo_unit_neto = round(costo_unit_iva / 1.19)
+        
+        precio_venta = redondear_precio_venta(costo_unit_iva * (1 + (margen / 100)), redondeo)
+        
+        filas_actuales.append({
+            "Fecha": fecha_hoy,
+            "Proveedor": str(doc.get("proveedor", "")),
+            "N° Doc": str(doc.get("numero_documento", "")),
+            "Producto": str(p.get("nombre", "")),
+            "Unid.": total_unidades,
+            "Neto Unit.": costo_unit_neto,
+            "Costo c/IVA": costo_unit_iva,
+            f"Venta ({margen}%)": precio_venta,
+            "Ganancia": precio_venta - costo_unit_iva
+        })
+
+    if filas_actuales:
+        df_actual = pd.DataFrame(filas_actuales)
+        st.subheader(f"{doc.get('tipo_documento', 'Documento')} N° {doc.get('numero_documento', '')} — {doc.get('proveedor', '')}")
+        
+        columnas_visibles = ["Producto", "Unid.", "Costo c/IVA", f"Venta ({margen}%)", "Ganancia"] if modo_vista == "Vertical" else list(df_actual.columns)
+
+        df_editado = st.data_editor(
+            df_actual[columnas_visibles],
+            use_container_width=True,
+            num_rows="dynamic",
+            key=f"editor_{st.session_state.ultima_foto_id}_{margen}_{redondeo}_{modo_vista}"
+        )
+        
+        if st.button("Guardar en lista del día", type="primary"):
+            if modo_vista == "Vertical":
+                df_guardar = df_actual.copy()
+                for col in columnas_visibles:
+                    if col in df_editado.columns:
+                        df_guardar[col] = df_editado[col]
+                st.session_state.historial.extend(df_guardar.to_dict(orient="records"))
+            else:
+                st.session_state.historial.extend(df_editado.to_dict(orient="records"))
+            st.success("Guardado.")
+    else:
+        st.warning("No se detectaron productos en la imagen. Intenta enfocar mejor los ítems.")
+
+if len(st.session_state.historial) > 0:
+    st.divider()
+    st.subheader("Registro del Día")
+    df_dia = pd.DataFrame(st.session_state.historial)
+    st.dataframe(df_dia, use_container_width=True)
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        buffer = io.BytesIO()
+        with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+            df_dia.to_excel(writer, index=False, sheet_name="Precios_Minimarket")
+            
+        st.download_button(
+            label="Descargar Excel del Día",
+            data=buffer.getvalue(),
+            file_name=f"precios_minimarket_{datetime.now().strftime('%Y-%m-%d')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+    with col2:
+        if st.button("Limpiar lista"):
+            st.session_state.historial = []
+            st.rerun()
