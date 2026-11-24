@@ -24,36 +24,33 @@ class Documento(BaseModel):
 def redondear_precio_venta(precio, multiplo=50):
     return int(math.ceil(precio / multiplo) * multiplo)
 
-def optimizar_imagen(imagen_pil, max_lado=1200):
-    img = ImageOps.exif_transpose(imagen_pil)
+def comprimir_para_ocr(imagen_pil, max_lado=1024):
+    img = ImageOps.exif_transpose(imagen_pil).convert("L")
     img.thumbnail((max_lado, max_lado))
-    return img
+    buffer = io.BytesIO()
+    img.save(buffer, format="JPEG", quality=75, optimize=True)
+    return types.Part.from_bytes(data=buffer.getvalue(), mime_type="image/jpeg")
+
+@st.cache_resource
+def obtener_cliente(api_key):
+    return genai.Client(api_key=api_key, http_options={"timeout": 8.0})
 
 st.set_page_config(page_title="Precios Minimarket", layout="wide", initial_sidebar_state="collapsed")
 
 st.markdown("""
     <style>
         .block-container {
-            padding-top: 1rem;
-            padding-bottom: 1rem;
-            padding-left: 1rem;
-            padding-right: 1rem;
+            padding: 1rem;
             max-width: 100%;
         }
         [data-testid="stCameraInput"] video, [data-testid="stCameraInput"] img {
-            max-height: 65vh;
+            max-height: 60vh;
             object-fit: contain;
-        }
-        @media (orientation: landscape) {
-            .block-container {
-                padding-left: 1.5rem;
-                padding-right: 1.5rem;
-            }
         }
     </style>
 """, unsafe_allow_html=True)
 
-st.title("Escáner de Facturas — Minimarket")
+st.title("Escáner Rápido — Minimarket")
 
 if "historial" not in st.session_state:
     st.session_state.historial = []
@@ -68,33 +65,30 @@ with col_cfg1:
 with col_cfg2:
     redondeo = st.selectbox("Redondear a:", [10, 50, 100], index=1)
 with col_cfg3:
-    modo_vista = st.radio("Orientación de tabla:", ["Horizontal (Completa)", "Vertical (Compacta)"], horizontal=True)
+    modo_vista = st.radio("Vista:", ["Horizontal", "Vertical"], horizontal=True)
 
-api_key = st.secrets["GEMINI_API_KEY"].strip()
+client = obtener_cliente(st.secrets["GEMINI_API_KEY"].strip())
 
-tab_cam, tab_subir = st.tabs(["Cámara Directa", "Subir Foto / Galería"])
+tab_cam, tab_subir = st.tabs(["Cámara Directa", "Subir Foto"])
 with tab_cam:
-    foto_cam = st.camera_input("Enfoca la factura en vertical u horizontal")
+    foto_cam = st.camera_input("Toma la foto")
 with tab_subir:
-    foto_archivo = st.file_uploader("Selecciona una foto tomada con tu cámara", type=["jpg", "jpeg", "png", "webp"])
+    foto_archivo = st.file_uploader("Sube una foto", type=["jpg", "jpeg", "png", "webp"])
 
 foto = foto_cam if foto_cam is not None else foto_archivo
 
 if foto is not None:
     foto_id = f"{foto.name}_{foto.size}"
     if foto_id != st.session_state.ultima_foto_id:
-        imagen_optimizada = optimizar_imagen(Image.open(foto))
-        client = genai.Client(api_key=api_key)
-        modelos = ["gemini-3.8-flash-lite", "gemini-3.8-flash"]
-            
-        with st.spinner("Procesando factura..."):
+        with st.spinner("Leyendo en segundos..."):
+            parte_imagen = comprimir_para_ocr(Image.open(foto))
+            modelos = ["gemini-3.8-flash-lite", "gemini-3.8-flash"]
             prompt = (
-                "Extrae el proveedor, número de documento y todos los productos. "
-                "Para cada producto indica cantidad_bultos (la columna CANT), "
-                "unidades_por_bulto (si la descripción dice CAJA 12 UNID, PACK 6, FARDÓN 6, etc., pon 12, 6, etc.; si es producto suelto pon 1) "
-                "y precio_total_linea. Indica tipo_documento ('Factura' o 'Boleta') y marca iva_desglosado_aparte=true "
-                "si los precios de las filas son netos y el IVA se suma al final, o false si el IVA ya está incluido."
+                "Extrae proveedor, numero_documento, tipo_documento ('Factura' o 'Boleta'), "
+                "iva_desglosado_aparte (true si filas son netas y el IVA se suma al final, false si ya incluye IVA) "
+                "y lista de items: nombre, cantidad_bultos (CANT), unidades_por_bulto (ej: CAJA 12 -> 12, PACK 6 -> 6, suelto -> 1) y precio_total_linea."
             )
+            
             respuesta = None
             ultimo_error = ""
             
@@ -102,11 +96,12 @@ if foto is not None:
                 try:
                     respuesta = client.models.generate_content(
                         model=m,
-                        contents=[imagen_optimizada, prompt],
+                        contents=[parte_imagen, prompt],
                         config=types.GenerateContentConfig(
                             response_mime_type="application/json",
                             response_schema=Documento,
-                            temperature=0.1,
+                            temperature=0.0,
+                            thinking_config=types.ThinkingConfig(thinking_budget=0),
                         ),
                     )
                     break
@@ -117,7 +112,7 @@ if foto is not None:
                 st.session_state.doc_actual = Documento.model_validate_json(respuesta.text)
                 st.session_state.ultima_foto_id = foto_id
             else:
-                st.error(f"Error de conexión con Gemini: {ultimo_error}")
+                st.error(f"Error: {ultimo_error}")
 
 if st.session_state.doc_actual is not None:
     doc = st.session_state.doc_actual
@@ -153,10 +148,7 @@ if st.session_state.doc_actual is not None:
     df_actual = pd.DataFrame(filas_actuales)
     st.subheader(f"{doc.tipo_documento} N° {doc.numero_documento} — {doc.proveedor}")
     
-    if modo_vista == "Vertical (Compacta)":
-        columnas_visibles = ["Producto", "Unid.", "Costo c/IVA", f"Venta ({margen}%)", "Ganancia"]
-    else:
-        columnas_visibles = list(df_actual.columns)
+    columnas_visibles = ["Producto", "Unid.", "Costo c/IVA", f"Venta ({margen}%)", "Ganancia"] if modo_vista == "Vertical" else list(df_actual.columns)
 
     df_editado = st.data_editor(
         df_actual[columnas_visibles],
@@ -166,7 +158,7 @@ if st.session_state.doc_actual is not None:
     )
     
     if st.button("Guardar en lista del día", type="primary"):
-        if modo_vista == "Vertical (Compacta)":
+        if modo_vista == "Vertical":
             df_guardar = df_actual.copy()
             for col in columnas_visibles:
                 if col in df_editado.columns:
@@ -174,11 +166,11 @@ if st.session_state.doc_actual is not None:
             st.session_state.historial.extend(df_guardar.to_dict(orient="records"))
         else:
             st.session_state.historial.extend(df_editado.to_dict(orient="records"))
-        st.success("Guardado en la lista del día.")
+        st.success("Guardado.")
 
 if len(st.session_state.historial) > 0:
     st.divider()
-    st.subheader("Registro Consolidado del Día")
+    st.subheader("Registro del Día")
     df_dia = pd.DataFrame(st.session_state.historial)
     st.dataframe(df_dia, use_container_width=True)
     
